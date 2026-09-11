@@ -18,13 +18,24 @@ const ENTRY_TYPE: Record<SourceType, string> = {
   other: "misc",
 };
 
+/** One TeX escape per special character, applied in a single pass so that
+ *  backslashes introduced by one replacement are never re-escaped. */
+const TEX_ESCAPES: Record<string, string> = {
+  "\\": "\\textbackslash{}",
+  "&": "\\&",
+  "%": "\\%",
+  "$": "\\$",
+  "#": "\\#",
+  "_": "\\_",
+  "{": "\\{",
+  "}": "\\}",
+  "~": "\\textasciitilde{}",
+  "^": "\\textasciicircum{}",
+};
+
 /** Escape the characters that are special in TeX. */
 export function escapeTex(value: string): string {
-  return value
-    .replace(/\\/g, "\\textbackslash{}")
-    .replace(/([&%$#_{}])/g, "\\$1")
-    .replace(/~/g, "\\textasciitilde{}")
-    .replace(/\^/g, "\\textasciicircum{}");
+  return value.replace(/[\\&%$#_{}~^]/g, (ch) => TEX_ESCAPES[ch]!);
 }
 
 function field(name: string, value: string | undefined): string | undefined {

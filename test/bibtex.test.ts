@@ -26,6 +26,16 @@ describe("escapeTex", () => {
   it("escapes special characters", () => {
     expect(escapeTex("A & B 50% #1 $x_y")).toBe("A \\& B 50\\% \\#1 \\$x\\_y");
   });
+
+  it("escapes a backslash without double-escaping its braces", () => {
+    expect(escapeTex("a\\b")).toBe("a\\textbackslash{}b");
+  });
+
+  it("escapes every special character in a single pass", () => {
+    expect(escapeTex('C\\^~ 50%_a{b}')).toBe(
+      "C\\textbackslash{}\\textasciicircum{}\\textasciitilde{} 50\\%\\_a\\{b\\}",
+    );
+  });
 });
 
 describe("toBibtexEntry", () => {
