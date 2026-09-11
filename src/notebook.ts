@@ -15,8 +15,10 @@ import * as path from "node:path";
 import {
   type NotebookData,
   type Note,
+  type Quote,
   type Source,
   type SourceType,
+  SOURCE_TYPES,
   emptyNotebook,
 } from "./types.js";
 import { uniqueCiteKey } from "./citekey.js";
@@ -429,7 +431,79 @@ function migrate(data: unknown): NotebookData {
   return {
     version: 1,
     title: obj.title,
-    sources: Array.isArray(obj.sources) ? (obj.sources as Source[]) : [],
-    notes: Array.isArray(obj.notes) ? (obj.notes as Note[]) : [],
+    sources: Array.isArray(obj.sources)
+      ? obj.sources.map(normaliseSource).filter((s): s is Source => s !== undefined)
+      : [],
+    notes: Array.isArray(obj.notes)
+      ? obj.notes.map(normaliseNote).filter((n): n is Note => n !== undefined)
+      : [],
+  };
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((v): v is string => typeof v === "string")
+    : [];
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function optionalTimestamp(value: unknown): string {
+  return typeof value === "string" && value.length > 0 ? value : new Date(0).toISOString();
+}
+
+/**
+ * Normalise one hand-edited source entry so that reads (stats, exports, search)
+ * never meet a missing field. The notebook is advertised as human-editable
+ * JSON, so a dropped array must not turn every tool into a raw TypeError.
+ */
+function normaliseSource(entry: unknown): Source | undefined {
+  if (!entry || typeof entry !== "object") return undefined;
+  const raw = entry as Partial<Source>;
+  if (typeof raw.id !== "string" || raw.id.length === 0) return undefined;
+  return {
+    id: raw.id,
+    citeKey:
+      typeof raw.citeKey === "string" && raw.citeKey.length > 0
+        ? raw.citeKey
+        : `source-${raw.id}`,
+    type: (SOURCE_TYPES as readonly string[]).includes(raw.type ?? "")
+      ? (raw.type as SourceType)
+      : "webpage",
+    title: typeof raw.title === "string" ? raw.title : "",
+    url: optionalString(raw.url),
+    authors: stringArray(raw.authors),
+    container: optionalString(raw.container),
+    publishedDate: optionalString(raw.publishedDate),
+    accessedDate: optionalTimestamp(raw.accessedDate),
+    doi: optionalString(raw.doi),
+    tags: stringArray(raw.tags),
+    quotes: Array.isArray(raw.quotes)
+      ? raw.quotes.filter(
+          (q): q is Quote =>
+            Boolean(q) && typeof q === "object" && typeof (q as Quote).text === "string",
+        )
+      : [],
+    summary: optionalString(raw.summary),
+    createdAt: optionalTimestamp(raw.createdAt),
+    updatedAt: optionalTimestamp(raw.updatedAt),
+  };
+}
+
+/** Normalise one hand-edited note entry so reads never meet a missing field. */
+function normaliseNote(entry: unknown): Note | undefined {
+  if (!entry || typeof entry !== "object") return undefined;
+  const raw = entry as Partial<Note>;
+  if (typeof raw.id !== "string" || raw.id.length === 0) return undefined;
+  return {
+    id: raw.id,
+    title: typeof raw.title === "string" ? raw.title : "",
+    content: typeof raw.content === "string" ? raw.content : "",
+    sourceIds: stringArray(raw.sourceIds),
+    tags: stringArray(raw.tags),
+    createdAt: optionalTimestamp(raw.createdAt),
+    updatedAt: optionalTimestamp(raw.updatedAt),
   };
 }

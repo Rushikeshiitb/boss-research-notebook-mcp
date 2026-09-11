@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Notebook, NotebookError, normaliseUrl } from "../src/notebook.js";
+import { exportBibliographyMarkdown } from "../src/markdown.js";
 
 async function tempDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "rn-test-"));
@@ -200,5 +201,64 @@ describe("Notebook resilience", () => {
     const nb = await Notebook.open(deps(dir));
     await nb.addSource({ title: "X" });
     await expect(fs.stat(path.join(dir, "notebook.json"))).resolves.toBeDefined();
+  });
+
+  it("normalises a hand-edited notebook missing array fields", async () => {
+    const dir = await tempDir();
+    await fs.writeFile(
+      path.join(dir, "notebook.json"),
+      JSON.stringify({
+        version: 1,
+        sources: [
+          {
+            id: "src-x",
+            citeKey: "hand2020edited",
+            type: "paper",
+            title: "Hand edited",
+            accessedDate: "2024-01-01T00:00:00.000Z",
+            createdAt: "2024-01-01T00:00:00.000Z",
+            updatedAt: "2024-01-01T00:00:00.000Z",
+          },
+        ],
+        notes: [
+          {
+            id: "note-x",
+            title: "n",
+            content: "c",
+            createdAt: "2024-01-01T00:00:00.000Z",
+            updatedAt: "2024-01-01T00:00:00.000Z",
+          },
+        ],
+      }),
+      "utf8",
+    );
+    const nb = await Notebook.open(deps(dir));
+    expect(nb.stats()).toEqual({
+      sources: 1,
+      notes: 1,
+      quotes: 0,
+      tags: [],
+      byType: { paper: 1 },
+    });
+    expect(nb.listSources()[0]!.authors).toEqual([]);
+    expect(nb.listNotes()[0]!.sourceIds).toEqual([]);
+    expect(exportBibliographyMarkdown(nb.snapshot())).toContain("hand2020edited");
+  });
+
+  it("drops malformed entries instead of keeping them", async () => {
+    const dir = await tempDir();
+    await fs.writeFile(
+      path.join(dir, "notebook.json"),
+      JSON.stringify({
+        version: 1,
+        sources: [{ title: "no id" }, "junk", null],
+        notes: [{ id: "note-ok", title: "ok", content: "x" }],
+      }),
+      "utf8",
+    );
+    const nb = await Notebook.open(deps(dir));
+    expect(nb.listSources()).toHaveLength(0);
+    expect(nb.listNotes()).toHaveLength(1);
+    expect(nb.listNotes()[0]!.sourceIds).toEqual([]);
   });
 });
