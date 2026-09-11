@@ -16,7 +16,7 @@ import { SOURCE_TYPES, type Note, type Source, type SourceType } from "./types.j
 
 export type FetchFn = (
   url: string,
-  init?: { headers?: Record<string, string> },
+  init?: { headers?: Record<string, string>; signal?: AbortSignal },
 ) => Promise<{ ok: boolean; status: number; text: () => Promise<string> }>;
 
 export interface CreateServerOptions {
@@ -114,6 +114,37 @@ const DEFAULT_HEADERS = {
   Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 };
 
+/** How long cite_url waits for a page before giving up. */
+export const CITE_FETCH_TIMEOUT_MS = 30_000;
+
+/**
+ * Whether cite_url may fetch a URL. The agent chooses the URL, so the server
+ * must not let it reach loopback, link-local (cloud metadata) or private
+ * addresses: only http/https, and no private IP literals (hostnames that
+ * resolve to private addresses still need care - see review follow-ups).
+ */
+export function isFetchableUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (host === "localhost") return false;
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (ipv4) {
+    const first = Number(ipv4[1]);
+    const second = Number(ipv4[2]);
+    if (first === 0 || first === 10 || first === 127) return false; // 0/8, 10/8, loopback
+    if (first === 169 && second === 254) return false; // link-local / metadata
+    if (first === 172 && second >= 16 && second <= 31) return false; // 172.16/12
+    if (first === 192 && second === 168) return false; // 192.168/16
+  }
+  return true;
+}
+
 export function createServer(options: CreateServerOptions): McpServer {
   const nb = options.notebook;
   const fetchFn: FetchFn = options.fetchFn ?? (globalThis.fetch as unknown as FetchFn);
@@ -172,7 +203,16 @@ export function createServer(options: CreateServerOptions): McpServer {
 
         let html: string;
         try {
-          const res = await fetchFn(url, { headers: DEFAULT_HEADERS });
+          if (!isFetchableUrl(url)) {
+            return fail(
+              `Refusing to fetch ${url}: cite_url only fetches http/https addresses ` +
+                "outside loopback, private and link-local ranges. Record it with add_source instead.",
+            );
+          }
+          const res = await fetchFn(url, {
+            headers: DEFAULT_HEADERS,
+            signal: AbortSignal.timeout(CITE_FETCH_TIMEOUT_MS),
+          });
           if (!res.ok) return fail(`Fetch failed for ${url} (HTTP ${res.status}).`);
           html = await res.text();
         } catch (err) {
@@ -471,7 +511,8 @@ export function createServer(options: CreateServerOptions): McpServer {
         tag: z.string().optional(),
         write: z.boolean().optional().describe("Also write references.bib to the notebook folder."),
       },
-      annotations: { readOnlyHint: true },
+      // No readOnlyHint: with write:true this tool writes references.bib, and
+      // clients use the hint to auto-approve tools without asking.
     },
     async ({ tag, write }) =>
       guard(async () => {
@@ -504,7 +545,7 @@ export function createServer(options: CreateServerOptions): McpServer {
         title: z.string().optional(),
         write: z.boolean().optional().describe("Also write references.md to the notebook folder."),
       },
-      annotations: { readOnlyHint: true },
+      // No readOnlyHint: with write:true this tool writes references.md.
     },
     async ({ annotated, tag, title, write }) =>
       guard(async () => {
@@ -532,7 +573,7 @@ export function createServer(options: CreateServerOptions): McpServer {
         title: z.string().optional(),
         write: z.boolean().optional().describe("Also write outline.md to the notebook folder."),
       },
-      annotations: { readOnlyHint: true },
+      // No readOnlyHint: with write:true this tool writes outline.md.
     },
     async ({ tag, title, write }) =>
       guard(async () => {
