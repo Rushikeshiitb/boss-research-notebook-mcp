@@ -49,8 +49,8 @@ export interface Source {
   container?: string;
   /** Publication date as an ISO date or a free-form year/label. */
   publishedDate?: string;
-  /** When you added it to the notebook. */
-  accessedDate: string; // ISO 8601
+  /** When you added it to the notebook. Absent on hand-edited entries. */
+  accessedDate?: string; // ISO 8601
   doi?: string;
   tags: string[];
   quotes: Quote[];

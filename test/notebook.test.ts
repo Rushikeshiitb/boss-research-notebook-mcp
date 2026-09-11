@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Notebook, NotebookError, normaliseUrl } from "../src/notebook.js";
 import { exportBibliographyMarkdown } from "../src/markdown.js";
+import { toBibtex } from "../src/bibtex.js";
 
 async function tempDir(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "rn-test-"));
@@ -203,7 +204,7 @@ describe("Notebook resilience", () => {
     await expect(fs.stat(path.join(dir, "notebook.json"))).resolves.toBeDefined();
   });
 
-  it("normalises a hand-edited notebook missing array fields", async () => {
+  it("normalises a hand-edited notebook missing fields", async () => {
     const dir = await tempDir();
     await fs.writeFile(
       path.join(dir, "notebook.json"),
@@ -215,9 +216,10 @@ describe("Notebook resilience", () => {
             citeKey: "hand2020edited",
             type: "paper",
             title: "Hand edited",
-            accessedDate: "2024-01-01T00:00:00.000Z",
             createdAt: "2024-01-01T00:00:00.000Z",
             updatedAt: "2024-01-01T00:00:00.000Z",
+            tags: ["ML", " ml "],
+            isbn: "978-3-16-148410-0",
           },
         ],
         notes: [
@@ -237,28 +239,62 @@ describe("Notebook resilience", () => {
       sources: 1,
       notes: 1,
       quotes: 0,
-      tags: [],
+      tags: ["ml"],
       byType: { paper: 1 },
     });
     expect(nb.listSources()[0]!.authors).toEqual([]);
+    // The stored tag is normalised like the write path does it, so a query
+    // in any case finds it.
+    expect(nb.listSources({ tag: "ML" })).toHaveLength(1);
     expect(nb.listNotes()[0]!.sourceIds).toEqual([]);
     expect(exportBibliographyMarkdown(nb.snapshot())).toContain("hand2020edited");
+    // No accessedDate was stored, so the BibTeX export must not invent one.
+    expect(toBibtex(nb.listSources())).not.toContain("urldate");
+    // Unknown keys survive a load/save round trip.
+    await nb.addSource({ title: "Another" });
+    const reloaded = JSON.parse(await fs.readFile(path.join(dir, "notebook.json"), "utf8"));
+    expect(reloaded.sources[0].isbn).toBe("978-3-16-148410-0");
   });
 
-  it("drops malformed entries instead of keeping them", async () => {
+  it("refuses to load a notebook with unrecognised entries", async () => {
     const dir = await tempDir();
     await fs.writeFile(
       path.join(dir, "notebook.json"),
       JSON.stringify({
         version: 1,
-        sources: [{ title: "no id" }, "junk", null],
+        sources: [{ title: "no id" }, "junk"],
         notes: [{ id: "note-ok", title: "ok", content: "x" }],
       }),
       "utf8",
     );
-    const nb = await Notebook.open(deps(dir));
-    expect(nb.listSources()).toHaveLength(0);
-    expect(nb.listNotes()).toHaveLength(1);
-    expect(nb.listNotes()[0]!.sourceIds).toEqual([]);
+    await expect(Notebook.open(deps(dir))).rejects.toBeInstanceOf(NotebookError);
   });
+});
+
+describe("Notebook normalisation details", () => {
+  it("dedupes and trims hand-edited authors", async () => {
+    const dir = await tempDir();
+    await fs.writeFile(
+      path.join(dir, "notebook.json"),
+      JSON.stringify({
+        version: 1,
+        sources: [
+          {
+            id: "src-a",
+            citeKey: "a2020",
+            type: "paper",
+            title: "A",
+            authors: [" Smith", "Smith", "jane"],
+            accessedDate: "2024-01-01T00:00:00.000Z",
+            createdAt: "2024-01-01T00:00:00.000Z",
+            updatedAt: "2024-01-01T00:00:00.000Z",
+          },
+        ],
+        notes: [],
+      }),
+      "utf8",
+    );
+    const nb = await Notebook.open(deps(dir));
+    expect(nb.listSources()[0]!.authors).toEqual(["Smith", "jane"]);
+});
 });

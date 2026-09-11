@@ -71,7 +71,9 @@ export function toBibtexEntry(source: Source): string {
   if (year !== "nd") fields.push(field("year", year));
   fields.push(field("doi", source.doi));
   if (entryType !== "misc") fields.push(rawField("url", source.url));
-  fields.push(field("urldate", source.accessedDate.slice(0, 10)));
+  if (source.accessedDate) {
+    fields.push(field("urldate", source.accessedDate.slice(0, 10)));
+  }
 
   const rendered = fields.filter((f): f is string => Boolean(f)).join(",\n");
   return `@${entryType}{${source.citeKey},\n${rendered}\n}`;

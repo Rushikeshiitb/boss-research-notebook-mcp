@@ -428,15 +428,35 @@ function dedupeStrings(values: string[]): string[] {
 function migrate(data: unknown): NotebookData {
   if (!data || typeof data !== "object") return emptyNotebook();
   const obj = data as Partial<NotebookData>;
+  const sources: Source[] = [];
+  const notes: Note[] = [];
+  const dropped: string[] = [];
+  (Array.isArray(obj.sources) ? obj.sources : []).forEach((entry, i) => {
+    const normalised = normaliseSource(entry);
+    if (normalised) sources.push(normalised);
+    else dropped.push(`sources[${i}]`);
+  });
+  (Array.isArray(obj.notes) ? obj.notes : []).forEach((entry, i) => {
+    const normalised = normaliseNote(entry);
+    if (normalised) notes.push(normalised);
+    else dropped.push(`notes[${i}]`);
+  });
+  // Fail closed, like the corrupt-JSON path: an entry the normaliser cannot
+  // read is a hand-editing mistake, and persisting the document without it
+  // would make the loss permanent on the next write.
+  if (dropped.length > 0) {
+    throw new NotebookError(
+      `notebook.json has ${dropped.length} unrecognised entr${
+        dropped.length === 1 ? "y" : "ies"
+      } (${dropped.join(", ")}). Every source and note needs a non-empty "id"; ` +
+        "fix or remove them before continuing.",
+    );
+  }
   return {
     version: 1,
-    title: obj.title,
-    sources: Array.isArray(obj.sources)
-      ? obj.sources.map(normaliseSource).filter((s): s is Source => s !== undefined)
-      : [],
-    notes: Array.isArray(obj.notes)
-      ? obj.notes.map(normaliseNote).filter((n): n is Note => n !== undefined)
-      : [],
+    title: typeof obj.title === "string" ? obj.title : undefined,
+    sources,
+    notes,
   };
 }
 
@@ -456,14 +476,16 @@ function optionalTimestamp(value: unknown): string {
 
 /**
  * Normalise one hand-edited source entry so that reads (stats, exports, search)
- * never meet a missing field. The notebook is advertised as human-editable
- * JSON, so a dropped array must not turn every tool into a raw TypeError.
+ * never meet a missing field, and writes see the same shape the write paths
+ * produce: tags trimmed/lowercased/deduped, authors deduped. Unknown keys
+ * (e.g. a hand-added "isbn") are preserved so a load/save cycle is lossless.
  */
 function normaliseSource(entry: unknown): Source | undefined {
   if (!entry || typeof entry !== "object") return undefined;
   const raw = entry as Partial<Source>;
   if (typeof raw.id !== "string" || raw.id.length === 0) return undefined;
   return {
+    ...raw,
     id: raw.id,
     citeKey:
       typeof raw.citeKey === "string" && raw.citeKey.length > 0
@@ -474,12 +496,12 @@ function normaliseSource(entry: unknown): Source | undefined {
       : "webpage",
     title: typeof raw.title === "string" ? raw.title : "",
     url: optionalString(raw.url),
-    authors: stringArray(raw.authors),
+    authors: dedupeStrings(stringArray(raw.authors)),
     container: optionalString(raw.container),
     publishedDate: optionalString(raw.publishedDate),
-    accessedDate: optionalTimestamp(raw.accessedDate),
+    accessedDate: optionalString(raw.accessedDate),
     doi: optionalString(raw.doi),
-    tags: stringArray(raw.tags),
+    tags: normaliseTags(stringArray(raw.tags)),
     quotes: Array.isArray(raw.quotes)
       ? raw.quotes.filter(
           (q): q is Quote =>
@@ -492,17 +514,21 @@ function normaliseSource(entry: unknown): Source | undefined {
   };
 }
 
-/** Normalise one hand-edited note entry so reads never meet a missing field. */
+/**
+ * Normalise one hand-edited note entry so reads never meet a missing field;
+ * unknown keys are preserved as for sources.
+ */
 function normaliseNote(entry: unknown): Note | undefined {
   if (!entry || typeof entry !== "object") return undefined;
   const raw = entry as Partial<Note>;
   if (typeof raw.id !== "string" || raw.id.length === 0) return undefined;
   return {
+    ...raw,
     id: raw.id,
     title: typeof raw.title === "string" ? raw.title : "",
     content: typeof raw.content === "string" ? raw.content : "",
     sourceIds: stringArray(raw.sourceIds),
-    tags: stringArray(raw.tags),
+    tags: normaliseTags(stringArray(raw.tags)),
     createdAt: optionalTimestamp(raw.createdAt),
     updatedAt: optionalTimestamp(raw.updatedAt),
   };

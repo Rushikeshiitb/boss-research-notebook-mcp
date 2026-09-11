@@ -109,7 +109,10 @@ Everything lives in the notebook directory:
 - `outline.md` - the literature-review scaffold, when you ask `generate_outline` to write.
 
 Because it is all plain text in your project, it version-controls cleanly and you
-can read or edit it without the server.
+can read or edit it without the server. Every source and note needs a non-empty
+`id`; the server normalises array fields on load (missing ones become empty,
+tags are lowercased and de-duplicated, unknown keys are kept) and refuses to
+start if an entry cannot be read at all.
 
 ## Example workflow
 
@@ -122,7 +125,10 @@ can read or edit it without the server.
 ## Privacy and safety
 
 - The only network request the server makes is fetching a URL you explicitly
-  pass to `cite_url`. Nothing else leaves your machine.
+  pass to `cite_url`, and only http/https addresses outside loopback, private
+  and link-local ranges (no cloud metadata, no local admin ports). Nothing
+  else leaves your machine.
+  Fetches give up after 30 seconds.
 - All data is stored locally in the notebook directory. There is no external
   service and no telemetry.
 - A failed or blocked fetch is reported cleanly; you can always fall back to
