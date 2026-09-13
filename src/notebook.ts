@@ -34,6 +34,13 @@ export interface NotebookDeps {
 
 export const NOTEBOOK_FILENAME = "notebook.json";
 
+/** How long to wait to acquire the write lock before giving up. */
+const LOCK_TIMEOUT_MS = 5_000;
+/** Poll interval while waiting for a held lock. */
+const LOCK_RETRY_MS = 25;
+/** A lock older than this is assumed abandoned by a crashed writer and stolen. */
+const LOCK_STALE_MS = 30_000;
+
 export interface AddSourceInput {
   title: string;
   type?: SourceType;
@@ -59,6 +66,14 @@ export class NotebookError extends Error {
   }
 }
 
+/** A persist was refused because notebook.json changed on disk since it loaded. */
+export class NotebookConflictError extends NotebookError {
+  constructor(message: string) {
+    super(message);
+    this.name = "NotebookConflictError";
+  }
+}
+
 /** Normalise a URL for de-duplication: drop fragment, tracking params, trailing slash. */
 export function normaliseUrl(url: string): string {
   try {
@@ -77,17 +92,30 @@ export function normaliseUrl(url: string): string {
   }
 }
 
+/** Identifies the exact on-disk file we last read or wrote, for conflict detection. */
+interface FileStamp {
+  mtimeMs: number;
+  size: number;
+}
+
 export class Notebook {
   private readonly dir: string;
   private readonly now: () => Date;
   private readonly makeId: () => string;
   private data: NotebookData;
+  /**
+   * The stamp of notebook.json as we last saw it (null when the file did not
+   * exist). Any change to this on disk before a persist means another editor
+   * or a second server wrote it, and we must not clobber that blindly.
+   */
+  private stamp: FileStamp | null;
 
-  private constructor(deps: NotebookDeps, data: NotebookData) {
+  private constructor(deps: NotebookDeps, data: NotebookData, stamp: FileStamp | null) {
     this.dir = deps.dir;
     this.now = deps.now ?? (() => new Date());
     this.makeId = deps.makeId ?? (() => randomBytes(4).toString("hex"));
     this.data = data;
+    this.stamp = stamp;
   }
 
   get filePath(): string {
@@ -102,32 +130,152 @@ export class Notebook {
   static async open(deps: NotebookDeps): Promise<Notebook> {
     await fs.mkdir(deps.dir, { recursive: true });
     const filePath = path.join(deps.dir, NOTEBOOK_FILENAME);
-    let data: NotebookData;
+    const { data, stamp } = await Notebook.readFrom(filePath);
+    return new Notebook(deps, data, stamp);
+  }
+
+  /** Read and migrate notebook.json, returning its data and on-disk stamp. */
+  private static async readFrom(
+    filePath: string,
+  ): Promise<{ data: NotebookData; stamp: FileStamp | null }> {
     try {
       const raw = await fs.readFile(filePath, "utf8");
-      data = migrate(JSON.parse(raw));
+      const info = await fs.stat(filePath);
+      return {
+        data: migrate(JSON.parse(raw)),
+        stamp: { mtimeMs: info.mtimeMs, size: info.size },
+      };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        data = emptyNotebook();
-      } else if (err instanceof SyntaxError) {
+        return { data: emptyNotebook(), stamp: null };
+      }
+      if (err instanceof SyntaxError) {
         throw new NotebookError(
           `notebook.json at ${filePath} is not valid JSON. Fix or remove it before continuing.`,
         );
-      } else {
-        throw err;
       }
+      throw err;
     }
-    return new Notebook(deps, data);
   }
 
   private timestamp(): string {
     return this.now().toISOString();
   }
 
+  private async currentStamp(): Promise<FileStamp | null> {
+    try {
+      const info = await fs.stat(this.filePath);
+      return { mtimeMs: info.mtimeMs, size: info.size };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw err;
+    }
+  }
+
+  private static sameStamp(a: FileStamp | null, b: FileStamp | null): boolean {
+    if (a === null || b === null) return a === b;
+    return a.mtimeMs === b.mtimeMs && a.size === b.size;
+  }
+
+  /**
+   * Write the whole in-memory document back, serialized against concurrent
+   * writers and guarded against silently overwriting an external edit.
+   *
+   * - An exclusive lock file (O_EXCL) serializes writers in this and any other
+   *   process sharing the directory, so the read-stamp / write / rename
+   *   sequence below cannot interleave with another writer's.
+   * - While holding the lock, if the file's stamp differs from the one we
+   *   loaded, someone changed it underneath us. We reload the on-disk version
+   *   (dropping the rejected mutation so memory is never left poisoned) and
+   *   throw, asking the caller to re-apply their change.
+   * - The temp file is unique per process and attempt, so two writers never
+   *   stream into the same scratch path.
+   */
   private async persist(): Promise<void> {
-    const tmp = `${this.filePath}.tmp`;
-    await fs.writeFile(tmp, JSON.stringify(this.data, null, 2) + "\n", "utf8");
-    await fs.rename(tmp, this.filePath); // atomic replace
+    let release: (() => Promise<void>) | null = null;
+    try {
+      release = await this.acquireLock();
+
+      const onDisk = await this.currentStamp();
+      if (!Notebook.sameStamp(onDisk, this.stamp)) {
+        // External write since we loaded: reload the truth and refuse, so we
+        // neither clobber that edit nor keep the rejected mutation in memory.
+        await this.reloadLocked();
+        throw new NotebookConflictError(
+          "notebook.json changed on disk since it was loaded (another editor or a " +
+            "second notebook server). Reloaded the on-disk version; re-apply your change.",
+        );
+      }
+
+      const tmp = `${this.filePath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+      try {
+        await fs.writeFile(tmp, JSON.stringify(this.data, null, 2) + "\n", "utf8");
+        await fs.rename(tmp, this.filePath); // atomic replace
+      } catch (err) {
+        await fs.rm(tmp, { force: true }).catch(() => {});
+        throw err;
+      }
+      this.stamp = await this.currentStamp();
+    } catch (err) {
+      // The caller mutated `this.data` before calling persist, so on any failure
+      // we restore consistency from the untouched on-disk bytes rather than a
+      // stale snapshot: a refused write must never leave memory poisoned. (The
+      // conflict path above already reloaded; reloading again is idempotent.)
+      if (!(err instanceof NotebookConflictError)) {
+        await this.reloadLocked().catch(() => {
+          /* disk unreadable: keep current state and surface the original error */
+        });
+      }
+      throw err;
+    } finally {
+      if (release) await release();
+    }
+  }
+
+  /** Replace in-memory data and stamp from disk. Caller must hold the lock. */
+  private async reloadLocked(): Promise<void> {
+    const reloaded = await Notebook.readFrom(this.filePath);
+    this.data = reloaded.data;
+    this.stamp = reloaded.stamp;
+  }
+
+  /** Acquire an advisory lock on the notebook; returns a release function. */
+  private async acquireLock(): Promise<() => Promise<void>> {
+    const lockPath = `${this.filePath}.lock`;
+    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    for (;;) {
+      try {
+        const handle = await fs.open(lockPath, "wx");
+        await handle.writeFile(String(process.pid));
+        await handle.close();
+        return async () => {
+          await fs.rm(lockPath, { force: true }).catch(() => {});
+        };
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        // Steal a lock left behind by a crashed writer.
+        const age = await this.lockAge(lockPath);
+        if (age !== null && age > LOCK_STALE_MS) {
+          await fs.rm(lockPath, { force: true }).catch(() => {});
+          continue;
+        }
+        if (Date.now() > deadline) {
+          throw new NotebookError(
+            "could not acquire the notebook lock; another write is in progress. Try again.",
+          );
+        }
+        await new Promise((r) => setTimeout(r, LOCK_RETRY_MS));
+      }
+    }
+  }
+
+  private async lockAge(lockPath: string): Promise<number | null> {
+    try {
+      const info = await fs.stat(lockPath);
+      return Date.now() - info.mtimeMs;
+    } catch {
+      return null; // vanished between open and stat; loop will retry
+    }
   }
 
   /** Write an arbitrary export file next to the notebook and return its path. */

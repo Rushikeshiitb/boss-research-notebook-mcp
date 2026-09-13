@@ -298,3 +298,101 @@ describe("Notebook normalisation details", () => {
     expect(nb.listSources()[0]!.authors).toEqual(["Smith", "jane"]);
 });
 });
+
+describe("Notebook concurrency and conflict safety", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await tempDir();
+  });
+
+  it("refuses to clobber an external edit made after load, and preserves it", async () => {
+    const nb = await Notebook.open(deps(dir));
+    await nb.addSource({ title: "A" });
+
+    // A different editor rewrites notebook.json out from under us.
+    const external = {
+      version: 1,
+      title: "Edited elsewhere",
+      sources: [],
+      notes: [],
+    };
+    await fs.writeFile(path.join(dir, "notebook.json"), JSON.stringify(external, null, 2), "utf8");
+    const externalBytes = await fs.readFile(path.join(dir, "notebook.json"), "utf8");
+
+    await expect(nb.addSource({ title: "B" })).rejects.toBeInstanceOf(NotebookError);
+
+    // The external bytes survived: our refused write changed nothing on disk.
+    expect(await fs.readFile(path.join(dir, "notebook.json"), "utf8")).toBe(externalBytes);
+    // And memory was not poisoned with the rejected "B"; it reflects disk.
+    expect(nb.listSources()).toHaveLength(0);
+    expect(nb.title).toBe("Edited elsewhere");
+  });
+
+  it("a second server sharing the directory is refused rather than overwriting", async () => {
+    const nb1 = await Notebook.open(deps(dir));
+    const nb2 = await Notebook.open(deps(dir)); // both loaded with no file yet
+
+    await nb1.addSource({ title: "From one" });
+    // nb2 loaded when the file did not exist; it must not blindly replace nb1's write.
+    await expect(nb2.addSource({ title: "From two" })).rejects.toBeInstanceOf(NotebookError);
+
+    const onDisk = JSON.parse(await fs.readFile(path.join(dir, "notebook.json"), "utf8"));
+    expect(onDisk.sources).toHaveLength(1);
+    expect(onDisk.sources[0].title).toBe("From one");
+  });
+
+  it("re-opening after a conflict lets the change be re-applied", async () => {
+    const nb = await Notebook.open(deps(dir));
+    await nb.addSource({ title: "A" });
+    await fs.writeFile(
+      path.join(dir, "notebook.json"),
+      JSON.stringify({ version: 1, sources: [], notes: [] }, null, 2),
+      "utf8",
+    );
+    await expect(nb.addSource({ title: "B" })).rejects.toBeInstanceOf(NotebookError);
+
+    // After the reload the notebook is usable again and the next write succeeds.
+    const added = await nb.addSource({ title: "B-again" });
+    expect(added.title).toBe("B-again");
+    const onDisk = JSON.parse(await fs.readFile(path.join(dir, "notebook.json"), "utf8"));
+    expect(onDisk.sources.map((s: { title: string }) => s.title)).toEqual(["B-again"]);
+  });
+
+  it("a failed write rolls back in-memory state and leaves disk untouched", async () => {
+    const nb = await Notebook.open(deps(dir));
+    await nb.addSource({ title: "A" });
+    const before = await fs.readFile(path.join(dir, "notebook.json"), "utf8");
+
+    // Make the directory read-only so the temp write / lock fails.
+    await fs.chmod(dir, 0o500);
+    try {
+      await expect(nb.addSource({ title: "B" })).rejects.toBeTruthy();
+    } finally {
+      await fs.chmod(dir, 0o700);
+    }
+
+    // Disk unchanged, and the rejected "B" did not survive in memory.
+    expect(await fs.readFile(path.join(dir, "notebook.json"), "utf8")).toBe(before);
+    expect(nb.listSources().map((s) => s.title)).toEqual(["A"]);
+  });
+
+  it("serializes concurrent writes without losing any (last count is correct)", async () => {
+    const nb = await Notebook.open(deps(dir));
+    // One instance, many overlapping writes: the lock must serialize them so
+    // every source lands rather than races clobbering the file.
+    await Promise.all(
+      Array.from({ length: 8 }, (_, i) => nb.addSource({ title: `S${i}` })),
+    );
+    const onDisk = JSON.parse(await fs.readFile(path.join(dir, "notebook.json"), "utf8"));
+    expect(onDisk.sources).toHaveLength(8);
+  });
+
+  it("leaves no .tmp or .lock files behind after writes", async () => {
+    const nb = await Notebook.open(deps(dir));
+    await nb.addSource({ title: "A" });
+    const leftovers = (await fs.readdir(dir)).filter(
+      (f) => f.endsWith(".tmp") || f.endsWith(".lock"),
+    );
+    expect(leftovers).toEqual([]);
+  });
+});
