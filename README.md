@@ -103,7 +103,8 @@ BOSS's tools and your agent can call them.
 
 Everything lives in the notebook directory:
 
-- `notebook.json` - the canonical store (sources and notes). Written atomically.
+- `notebook.json` - the canonical store (sources and notes). Written atomically
+  (unique temp file + rename) under an advisory lock.
 - `references.bib` - BibTeX, when you ask `export_bibtex` to write.
 - `references.md` - Markdown bibliography, when you ask `export_markdown` to write.
 - `outline.md` - the literature-review scaffold, when you ask `generate_outline` to write.
@@ -113,6 +114,15 @@ can read or edit it without the server. Every source and note needs a non-empty
 `id`; the server normalises array fields on load (missing ones become empty,
 tags are lowercased and de-duplicated, unknown keys are kept) and refuses to
 start if an entry cannot be read at all.
+
+**Editing it while the server runs:** the server loads `notebook.json` once and
+writes the whole document back on each change. If the file changes on disk
+underneath it - you hand-edited it, or a second server shares the directory - the
+next write is **refused** rather than silently overwriting your edit: the server
+reloads the on-disk version and returns a conflict error asking you to re-apply
+your change. A refused or failed write never corrupts the file or the in-memory
+copy. Writes are serialized by a lock file, so two servers on one directory take
+turns instead of clobbering each other.
 
 ## Example workflow
 
@@ -124,11 +134,19 @@ start if an entry cannot be read at all.
 
 ## Privacy and safety
 
-- The only network request the server makes is fetching a URL you explicitly
-  pass to `cite_url`, and only http/https addresses outside loopback, private
-  and link-local ranges (no cloud metadata, no local admin ports). Nothing
-  else leaves your machine.
-  Fetches give up after 30 seconds.
+- The only outbound request the server makes is `cite_url` fetching a page.
+  Because the **agent**, not you, picks that URL, the fetch is hardened against
+  being pointed at your own network (SSRF):
+  - only `http`/`https`;
+  - the hostname is resolved and **every** address it returns is checked - the
+    request is refused if any is loopback, private, link-local (cloud metadata at
+    `169.254.169.254`), CGNAT or IPv6 loopback/ULA/link-local/mapped-private;
+  - the connection is **pinned** to the validated address, so a name cannot be
+    re-resolved to a private address after the check (DNS-rebinding);
+  - redirects are followed manually and **each hop is re-validated**, so a public
+    page cannot bounce the fetch to an internal one;
+  - the response body is **capped** (5 MiB) and the fetch gives up after 30 s.
+  Nothing else leaves your machine.
 - All data is stored locally in the notebook directory. There is no external
   service and no telemetry.
 - A failed or blocked fetch is reported cleanly; you can always fall back to
