@@ -49,7 +49,8 @@ threads in the right citations.
 ## Quick start
 
 ```bash
-cd mcp-servers/research-notebook
+git clone https://github.com/Rushikeshiitb/boss-research-notebook-mcp.git
+cd boss-research-notebook-mcp
 npm install
 npm run build
 ```
@@ -58,6 +59,14 @@ Run it directly (it speaks MCP over stdio):
 
 ```bash
 RESEARCH_NOTEBOOK_DIR="$PWD/.research-notebook" node dist/index.js
+```
+
+Or install it on your `PATH` as `research-notebook-mcp` (the package declares a
+`bin`):
+
+```bash
+npm install -g .          # from the cloned repo
+# now `research-notebook-mcp` launches the server over stdio
 ```
 
 ### Cite keys
@@ -69,16 +78,20 @@ cite key or its internal id in every tool that takes a source.
 
 ## Connecting it to BOSS
 
-BOSS connects to MCP servers the same way other agent hosts do. Add an entry
-that launches this server and point it at the project folder you want the
-notebook to live in. A typical MCP client configuration looks like this:
+BOSS drives coding CLIs (Claude Code, Codex, Gemini, OpenCode), and each of
+them loads MCP servers from its own configuration - so you register this server
+with the CLI you use inside BOSS. It is a stdio server: the client launches it
+and talks over stdin/stdout.
+
+**Project-scoped config file (portable across clients).** Drop a `.mcp.json` in
+the root of the project you open in BOSS:
 
 ```json
 {
   "mcpServers": {
     "research-notebook": {
       "command": "node",
-      "args": ["/absolute/path/to/mcp-servers/research-notebook/dist/index.js"],
+      "args": ["/absolute/path/to/boss-research-notebook-mcp/dist/index.js"],
       "env": {
         "RESEARCH_NOTEBOOK_DIR": "/absolute/path/to/your/project/.research-notebook",
         "RESEARCH_NOTEBOOK_TITLE": "My Literature Review"
@@ -88,9 +101,19 @@ notebook to live in. A typical MCP client configuration looks like this:
 }
 ```
 
-The same block works for any MCP-capable agent BOSS runs (Claude Code, Codex,
-and others). Once connected, the 17 tools above appear alongside the rest of
-BOSS's tools and your agent can call them.
+**Claude Code, one command** (run it in your project directory):
+
+```bash
+claude mcp add research-notebook \
+  -e RESEARCH_NOTEBOOK_DIR="$PWD/.research-notebook" \
+  -- node /absolute/path/to/boss-research-notebook-mcp/dist/index.js
+```
+
+If you installed it globally (`npm install -g .`), the command is simply
+`research-notebook-mcp` in place of `node .../dist/index.js`.
+
+Once connected, the 17 tools above appear to your agent alongside the rest of
+the tools it can call.
 
 ## Configuration
 
