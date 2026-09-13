@@ -13,15 +13,19 @@ import { extractMetadata } from "./metadata.js";
 import { toBibtex } from "./bibtex.js";
 import { exportBibliographyMarkdown, generateOutline, renderReference } from "./markdown.js";
 import { SOURCE_TYPES, type Note, type Source, type SourceType } from "./types.js";
+import { createSafeFetch, isFetchableUrl, type FetchFn } from "./net.js";
 
-export type FetchFn = (
-  url: string,
-  init?: { headers?: Record<string, string>; signal?: AbortSignal },
-) => Promise<{ ok: boolean; status: number; text: () => Promise<string> }>;
+// Re-exported so existing consumers and tests keep importing these from here.
+export { isFetchableUrl, type FetchFn } from "./net.js";
 
 export interface CreateServerOptions {
   notebook: Notebook;
-  /** Injectable fetch; defaults to the global fetch. */
+  /**
+   * Injectable fetch; defaults to `createSafeFetch()`, which resolves and
+   * validates every hop, pins the connection to the validated address,
+   * follows redirects manually and caps the body. Tests inject a fake here to
+   * stay off the network.
+   */
   fetchFn?: FetchFn;
   name?: string;
   version?: string;
@@ -117,37 +121,9 @@ const DEFAULT_HEADERS = {
 /** How long cite_url waits for a page before giving up. */
 export const CITE_FETCH_TIMEOUT_MS = 30_000;
 
-/**
- * Whether cite_url may fetch a URL. The agent chooses the URL, so the server
- * must not let it reach loopback, link-local (cloud metadata) or private
- * addresses: only http/https, and no private IP literals (hostnames that
- * resolve to private addresses still need care - see review follow-ups).
- */
-export function isFetchableUrl(url: string): boolean {
-  let parsed: URL;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return false;
-  }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return false;
-  const host = parsed.hostname.replace(/^\[|\]$/g, "");
-  if (host === "localhost") return false;
-  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (ipv4) {
-    const first = Number(ipv4[1]);
-    const second = Number(ipv4[2]);
-    if (first === 0 || first === 10 || first === 127) return false; // 0/8, 10/8, loopback
-    if (first === 169 && second === 254) return false; // link-local / metadata
-    if (first === 172 && second >= 16 && second <= 31) return false; // 172.16/12
-    if (first === 192 && second === 168) return false; // 192.168/16
-  }
-  return true;
-}
-
 export function createServer(options: CreateServerOptions): McpServer {
   const nb = options.notebook;
-  const fetchFn: FetchFn = options.fetchFn ?? (globalThis.fetch as unknown as FetchFn);
+  const fetchFn: FetchFn = options.fetchFn ?? createSafeFetch();
 
   const server = new McpServer({
     name: options.name ?? "research-notebook",
